@@ -1,0 +1,37 @@
+import { create } from 'zustand';
+
+export const useMaistroStore = create((set, get) => ({
+  health: null,
+  sheet: null,
+  session: null,
+  stats: null,
+  wsStatus: 'disconnected',
+  tempo: 120,
+  enableMetronome: true,
+  enableFeedback: true,
+  latestPitch: null,
+  mistakes: [],
+  currentNoteIndex: null,
+  error: '',
+  uploadBusy: false,
+  practiceBusy: false,
+  audioSource: import.meta.env.VITE_AUDIO_SOURCE || 'browser',
+
+  setHealth: (health) => set({ health }),
+  setSheet: (sheet) => set({ sheet, mistakes: [], latestPitch: null, currentNoteIndex: null, stats: null }),
+  setTempo: (tempo) => set({ tempo }),
+  setEnableMetronome: (enableMetronome) => set({ enableMetronome }),
+  setEnableFeedback: (enableFeedback) => set({ enableFeedback }),
+  setSession: (session) => set({ session, stats: null }),
+  setStats: (stats) => set({ stats }),
+  setWsStatus: (wsStatus) => set({ wsStatus }),
+  setError: (error) => set({ error }),
+  setUploadBusy: (uploadBusy) => set({ uploadBusy }),
+  setPracticeBusy: (practiceBusy) => set({ practiceBusy }),
+  setLatestPitch: (latestPitch) => set({ latestPitch, currentNoteIndex: latestPitch?.note_index ?? get().currentNoteIndex }),
+  addMistake: (mistake) => set((state) => ({
+    mistakes: [mistake, ...state.mistakes].slice(0, 50),
+    currentNoteIndex: mistake.note_index ?? state.currentNoteIndex,
+  })),
+  resetPractice: () => set({ latestPitch: null, mistakes: [], currentNoteIndex: null, stats: null }),
+}));

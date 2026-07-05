@@ -1,0 +1,26 @@
+{
+  "name": "maistro-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 3000"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "axios": "latest",
+    "opensheetmusicdisplay": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "tone": "latest",
+    "vite": "latest",
+    "zustand": "latest"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.5.2",
+    "postcss": "^8.5.16",
+    "tailwindcss": "^3.4.17"
+  }
+}

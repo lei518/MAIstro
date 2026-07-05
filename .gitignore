@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+node_modules/
+dist/
+backend/data/*.db
+backend/data/*.db-*
+backend/data/uploads/*
+backend/data/sheets/*
+!backend/data/uploads/.gitkeep
+!backend/data/sheets/.gitkeep
+backend/models/*.tflite
+backend/models/*.onnx
+backend/models/*.pkl
+.DS_Store

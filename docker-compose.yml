@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: maistro-backend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/backend/data
+      - ./backend/models:/app/backend/models
+      - ./backend/data/uploads:/app/backend/data/uploads
+      - ./backend/data/sheets:/app/backend/data/sheets
+    devices:
+      - "/dev/snd:/dev/snd"
+    group_add:
+      - audio
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: maistro-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: maistro-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
