@@ -248,31 +248,54 @@ class AudiverisOMR:
             return "image/png"
         return "application/octet-stream"
 
-
 class MusicXMLAnalyzer:
     def analyze(self, musicxml: str, default_tempo: int = 120) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile("w", suffix=".musicxml", encoding="utf-8", delete=False) as fh:
             fh.write(musicxml)
             tmp_path = Path(fh.name)
+
         try:
             score = converter.parse(str(tmp_path))
             flat = score.flatten()
+
             notes: list[dict[str, Any]] = []
             note_index = 0
+
             accidentals = 0
             intervals: list[int] = []
             last_midi: Optional[int] = None
             smallest_duration = 4.0
+            chord_count = 0
+            dotted_count = 0
+            tuplet_count = 0
+
+            midi_values: list[int] = []
+
             for el in flat.notesAndRests:
                 start_q = float(el.offset)
                 duration_q = float(el.duration.quarterLength or 0.0)
+
                 measure_number = None
                 try:
                     measure_number = el.measureNumber
                 except Exception:
                     pass
+
                 if duration_q > 0:
                     smallest_duration = min(smallest_duration, duration_q)
+
+                try:
+                    if el.duration.dots and el.duration.dots > 0:
+                        dotted_count += 1
+                except Exception:
+                    pass
+
+                try:
+                    if el.duration.tuplets:
+                        tuplet_count += len(el.duration.tuplets)
+                except Exception:
+                    pass
+
                 if isinstance(el, music21_note.Rest):
                     notes.append(
                         {
@@ -288,21 +311,33 @@ class MusicXMLAnalyzer:
                     )
                     note_index += 1
                     continue
+
                 pitch_obj = None
+
                 if isinstance(el, music21_note.Note):
                     pitch_obj = el.pitch
+
                 elif isinstance(el, music21_chord.Chord) and el.pitches:
-                    # MAIstro is monophonic; choose highest pitch but count this as difficulty.
+                    # MAIstro is intended for monophonic beginner sheets.
+                    # If a chord appears, use the highest pitch for playback comparison,
+                    # but count it as added difficulty.
+                    chord_count += 1
                     pitch_obj = max(el.pitches, key=lambda p: p.midi)
-                    accidentals += 1
+
                 if pitch_obj is None:
                     continue
+
                 midi = int(pitch_obj.midi)
+                midi_values.append(midi)
+
                 if pitch_obj.accidental is not None:
                     accidentals += 1
+
                 if last_midi is not None:
                     intervals.append(abs(midi - last_midi))
+
                 last_midi = midi
+
                 notes.append(
                     {
                         "index": note_index,
@@ -315,18 +350,42 @@ class MusicXMLAnalyzer:
                         "measure": measure_number,
                     }
                 )
+
                 note_index += 1
+
             notes_count = len([n for n in notes if not n.get("is_rest")])
-            total_quarters = max((n["start_quarter"] + n["duration_quarter"] for n in notes), default=0.0)
+            total_quarters = max(
+                (n["start_quarter"] + n["duration_quarter"] for n in notes),
+                default=0.0,
+            )
             duration_seconds = float(total_quarters * 60.0 / default_tempo)
-            difficulty_score = self._difficulty_score(notes_count, duration_seconds, accidentals, intervals, smallest_duration)
+
+            difficulty = self._classify_difficulty(
+                score=score,
+                notes_count=notes_count,
+                duration_seconds=duration_seconds,
+                accidentals=accidentals,
+                intervals=intervals,
+                smallest_duration=smallest_duration,
+                dotted_count=dotted_count,
+                tuplet_count=tuplet_count,
+                chord_count=chord_count,
+                midi_values=midi_values,
+            )
+
             return {
                 "notes": notes,
                 "notes_count": notes_count,
                 "duration_seconds": duration_seconds,
-                "difficulty_score": difficulty_score,
+                "difficulty_score": difficulty["difficulty_score"],
+                "difficulty_label": difficulty["difficulty_label"],
+                "estimated_grade": difficulty["estimated_grade"],
+                "omr_disclaimer_required": difficulty["omr_disclaimer_required"],
+                "difficulty_reasons": difficulty["difficulty_reasons"],
+                "difficulty_features": difficulty["difficulty_features"],
                 "notes_json": json.dumps(notes),
             }
+
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
@@ -334,20 +393,263 @@ class MusicXMLAnalyzer:
                 pass
 
     @staticmethod
-    def _difficulty_score(notes_count: int, duration_seconds: float, accidentals: int, intervals: list[int], smallest_duration: float) -> float:
-        density = notes_count / max(duration_seconds, 1.0)
-        density_score = min(1.0, density / 4.0)
-        accidental_score = min(1.0, accidentals / max(notes_count, 1) * 4.0)
-        interval_score = min(1.0, (float(np.mean(intervals)) if intervals else 0.0) / 12.0)
-        rhythm_score = 0.0
-        if smallest_duration <= 0.25:
-            rhythm_score = 1.0
-        elif smallest_duration <= 0.5:
-            rhythm_score = 0.65
-        elif smallest_duration <= 1.0:
-            rhythm_score = 0.35
-        return float(max(0.0, min(1.0, 0.40 * density_score + 0.20 * accidental_score + 0.20 * interval_score + 0.20 * rhythm_score)))
+    def _safe_measure_count(score) -> int:
+        try:
+            measures = list(score.recurse().getElementsByClass("Measure"))
+            return len(measures)
+        except Exception:
+            return 0
 
+    @staticmethod
+    def _extract_time_signatures(score) -> list[str]:
+        found: list[str] = []
+
+        try:
+            for ts in score.recurse().getElementsByClass("TimeSignature"):
+                ratio = getattr(ts, "ratioString", None)
+                if ratio and ratio not in found:
+                    found.append(str(ratio))
+        except Exception:
+            pass
+
+        return found or ["4/4"]
+
+    @staticmethod
+    def _extract_key_fifths(score) -> list[int]:
+        fifths_values: list[int] = []
+
+        try:
+            for ks in score.recurse().getElementsByClass("KeySignature"):
+                sharps = getattr(ks, "sharps", None)
+                if sharps is not None:
+                    fifths_values.append(int(sharps))
+        except Exception:
+            pass
+
+        return fifths_values or [0]
+
+    @staticmethod
+    def _time_signature_to_tuple(value: str) -> tuple[int, int] | None:
+        try:
+            top, bottom = value.split("/")
+            return int(top), int(bottom)
+        except Exception:
+            return None
+
+    def _classify_difficulty(
+        self,
+        score,
+        notes_count: int,
+        duration_seconds: float,
+        accidentals: int,
+        intervals: list[int],
+        smallest_duration: float,
+        dotted_count: int,
+        tuplet_count: int,
+        chord_count: int,
+        midi_values: list[int],
+    ) -> dict[str, Any]:
+        """
+        MAIstro difficulty classifier.
+
+        Mapping:
+        Beginner     = Grade 1–2
+        Intermediate = Grade 3
+        Advanced     = Grade 4+
+
+        This is a rule-based thesis prototype classifier based on automatically
+        extractable MusicXML features.
+        """
+
+        points = 0
+        reasons: list[str] = []
+
+        measure_count = self._safe_measure_count(score)
+        time_signatures = self._extract_time_signatures(score)
+        time_tuples = [
+            parsed for parsed in [self._time_signature_to_tuple(ts) for ts in time_signatures]
+            if parsed is not None
+        ]
+
+        key_fifths_values = self._extract_key_fifths(score)
+        max_abs_key_fifths = max([abs(v) for v in key_fifths_values], default=0)
+        key_change_count = max(0, len(set(key_fifths_values)) - 1)
+        meter_change_count = max(0, len(set(time_signatures)) - 1)
+
+        pitch_range = 0
+        if midi_values:
+            pitch_range = max(midi_values) - min(midi_values)
+
+        density = notes_count / max(duration_seconds, 1.0)
+        average_interval = float(np.mean(intervals)) if intervals else 0.0
+
+        beginner_meters = {
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (2, 2),
+            (6, 8),
+        }
+
+        intermediate_meters = {
+            (9, 8),
+            (12, 8),
+            (3, 8),
+        }
+
+        has_asymmetrical_meter = any(top in {5, 7, 11, 13} for top, _ in time_tuples)
+        has_uncommon_meter = any(
+            ts not in beginner_meters and ts not in intermediate_meters
+            for ts in time_tuples
+        )
+
+        # 1. Meter / time signature
+        if has_asymmetrical_meter:
+            points += 28
+            reasons.append("Contains asymmetrical meter, which is beyond beginner level.")
+        elif has_uncommon_meter:
+            points += 18
+            reasons.append("Contains uncommon meter.")
+        elif any(ts in intermediate_meters for ts in time_tuples):
+            points += 10
+            reasons.append("Contains compound or less common beginner meter.")
+        else:
+            reasons.append("Uses beginner-friendly meter.")
+
+        if meter_change_count > 0:
+            points += 12
+            reasons.append("Contains meter changes.")
+
+        # 2. Key signature
+        if max_abs_key_fifths <= 3:
+            reasons.append("Key signature is within beginner range.")
+        elif max_abs_key_fifths <= 5:
+            points += 14
+            reasons.append("Key signature is wider than beginner range.")
+        else:
+            points += 24
+            reasons.append("Key signature is advanced.")
+
+        if key_change_count > 0:
+            points += 10
+            reasons.append("Contains key changes.")
+
+        # 3. Rhythm / note values
+        if smallest_duration <= 0.125:
+            points += 30
+            reasons.append("Contains 32nd notes or shorter rhythmic values.")
+        elif smallest_duration <= 0.25:
+            points += 18
+            reasons.append("Contains 16th-note rhythmic values.")
+        elif smallest_duration <= 0.5:
+            points += 6
+            reasons.append("Contains eighth-note movement.")
+        else:
+            reasons.append("Uses simple note/rest values.")
+
+        if tuplet_count > 0:
+            points += 14
+            reasons.append("Contains tuplets or triplet rhythms.")
+
+        dotted_ratio = dotted_count / max(notes_count, 1)
+        if dotted_ratio >= 0.20:
+            points += 10
+            reasons.append("Contains frequent dotted rhythms.")
+        elif dotted_count > 0:
+            points += 4
+            reasons.append("Contains some dotted rhythms.")
+
+        # 4. Pitch range
+        if pitch_range >= 24:
+            points += 22
+            reasons.append("Uses a wide pitch range.")
+        elif pitch_range >= 16:
+            points += 10
+            reasons.append("Uses a moderate pitch range.")
+        else:
+            reasons.append("Pitch range is beginner-friendly.")
+
+        # 5. Leaps / intervals
+        if average_interval >= 9:
+            points += 12
+            reasons.append("Contains larger melodic leaps.")
+        elif average_interval >= 6:
+            points += 6
+            reasons.append("Contains moderate melodic movement.")
+
+        # 6. Accidentals
+        accidental_ratio = accidentals / max(notes_count, 1)
+        if accidentals >= 8 or accidental_ratio >= 0.18:
+            points += 10
+            reasons.append("Contains frequent accidentals.")
+        elif accidentals > 0:
+            points += 4
+            reasons.append("Contains some accidentals.")
+
+        # 7. Chords / polyphony
+        if chord_count > 0:
+            points += 20
+            reasons.append("Contains chord symbols or polyphonic note events, which exceed the monophonic beginner scope.")
+
+        # 8. Density
+        if density >= 3.5:
+            points += 14
+            reasons.append("Contains high note density.")
+        elif density >= 2.3:
+            points += 7
+            reasons.append("Contains moderate note density.")
+
+        # 9. Length
+        if measure_count >= 48:
+            points += 12
+            reasons.append("Longer piece length increases difficulty.")
+        elif measure_count >= 24:
+            points += 6
+            reasons.append("Moderate piece length.")
+
+        difficulty_score = float(max(0.0, min(1.0, points / 100.0)))
+
+        if points < 30:
+            difficulty_label = "Beginner"
+            estimated_grade = "Grade 1–2"
+        elif points < 60:
+            difficulty_label = "Intermediate"
+            estimated_grade = "Grade 3"
+        else:
+            difficulty_label = "Advanced"
+            estimated_grade = "Grade 4+"
+
+        # Keep reasons short for the dashboard.
+        cleaned_reasons = []
+        for reason in reasons:
+            if reason not in cleaned_reasons:
+                cleaned_reasons.append(reason)
+
+        return {
+            "difficulty_score": difficulty_score,
+            "difficulty_label": difficulty_label,
+            "estimated_grade": estimated_grade,
+            "omr_disclaimer_required": difficulty_label in {"Intermediate", "Advanced"},
+            "difficulty_reasons": cleaned_reasons[:7],
+            "difficulty_features": {
+                "points": points,
+                "notes_count": notes_count,
+                "measure_count": measure_count,
+                "duration_seconds": duration_seconds,
+                "time_signatures": time_signatures,
+                "meter_changes": meter_change_count,
+                "max_abs_key_fifths": max_abs_key_fifths,
+                "key_changes": key_change_count,
+                "smallest_duration_quarter": smallest_duration,
+                "dotted_notes": dotted_count,
+                "tuplets": tuplet_count,
+                "accidentals": accidentals,
+                "chords": chord_count,
+                "pitch_range_semitones": pitch_range,
+                "average_interval_semitones": average_interval,
+                "note_density_per_second": density,
+            },
+        }
 
 def expected_note_at_elapsed(notes: list[dict[str, Any]], elapsed_seconds: float, tempo: int) -> Optional[dict[str, Any]]:
     if not notes:

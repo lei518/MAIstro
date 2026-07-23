@@ -35,6 +35,18 @@ export default function ScoreViewer() {
 
   const [renderState, setRenderState] = useState('idle');
   const [renderError, setRenderError] = useState('');
+  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false);
+
+  const needsDisclaimer =
+    sheet?.omr_disclaimer_required ||
+    sheet?.difficulty_label === 'Intermediate' ||
+    sheet?.difficulty_label === 'Advanced';
+
+  useEffect(() => {
+    setDisclaimerAccepted(false);
+    setRenderState('idle');
+    setRenderError('');
+  }, [sheet?.sheet_id]);
 
   function keepCursorVisible() {
     const container = containerRef.current;
@@ -104,6 +116,10 @@ export default function ScoreViewer() {
     async function renderScore() {
       if (!sheet?.musicxml || !containerRef.current) return;
 
+      // If the sheet is Intermediate/Advanced, show disclaimer first.
+      // The score will only render after the user clicks the confirmation button.
+      if (needsDisclaimer && !disclaimerAccepted) return;
+
       setRenderState('loading');
       setRenderError('');
 
@@ -143,7 +159,7 @@ export default function ScoreViewer() {
     }
 
     renderScore();
-  }, [sheet?.musicxml]);
+  }, [sheet?.musicxml, needsDisclaimer, disclaimerAccepted]);
 
   useEffect(() => {
     window.addEventListener('maistro:practice-reset', resetCursor);
@@ -164,6 +180,49 @@ export default function ScoreViewer() {
         <p className="mt-2 text-sm text-slate-600">
           Upload a beginner sheet image to render the score here.
         </p>
+      </section>
+    );
+  }
+
+  if (sheet && needsDisclaimer && !disclaimerAccepted) {
+    return (
+      <section className="rounded-2xl bg-white p-6 shadow-lg">
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6">
+          <p className="mb-2 text-sm font-semibold uppercase tracking-[0.2em] text-amber-700">
+            OMR Accuracy Disclaimer
+          </p>
+
+          <h2 className="mb-3 text-2xl font-bold text-amber-950">
+            This sheet was classified as {sheet.difficulty_label}.
+          </h2>
+
+          <p className="mb-4 text-sm leading-6 text-amber-900">
+            MAIstro is optimized for beginner, single-staff music sheets. Since this uploaded sheet was
+            classified as {sheet.difficulty_label}, Audiveris may render some notes, rhythms,
+            articulations, or measures less accurately. Please review the rendered sheet before starting practice.
+          </p>
+
+          {sheet.difficulty_reasons?.length > 0 && (
+            <div className="mb-4 rounded-xl bg-white/70 p-4">
+              <p className="mb-2 font-semibold text-amber-950">
+                Why this was classified as {sheet.difficulty_label}:
+              </p>
+
+              <ul className="list-disc space-y-1 pl-5 text-sm text-amber-900">
+                {sheet.difficulty_reasons.map((reason, index) => (
+                  <li key={`${reason}-${index}`}>{reason}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <button
+            onClick={() => setDisclaimerAccepted(true)}
+            className="rounded-lg bg-amber-500 px-4 py-3 font-semibold text-white hover:bg-amber-400"
+          >
+            I understand, render the sheet
+          </button>
+        </div>
       </section>
     );
   }

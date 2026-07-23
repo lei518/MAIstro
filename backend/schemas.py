@@ -27,8 +27,13 @@ class SheetUploadResponse(BaseModel):
     notes_count: int
     duration_seconds: float
     difficulty_score: float
+    difficulty_label: str = "Beginner"
+    estimated_grade: str = "Grade 1–2"
+    omr_disclaimer_required: bool = False
+    difficulty_reasons: list[str] = Field(default_factory=list)
+    difficulty_features: dict[str, Any] = Field(default_factory=dict)
     musicxml: str
-    notes: list[NoteEvent]
+    notes: list[dict[str, Any]] = Field(default_factory=list)
     timestamp: str
 
 
@@ -40,6 +45,11 @@ class SheetMetadataResponse(BaseModel):
     difficulty_score: float
     uploaded_at: str
     notes: list[NoteEvent] = []
+    difficulty_label: str = "Beginner"
+    estimated_grade: str = "Grade 1–2"
+    omr_disclaimer_required: bool = False
+    difficulty_reasons: list[str] = Field(default_factory=list)
+    difficulty_features: dict[str, Any] = Field(default_factory=dict)
 
 
 class StartSessionRequest(BaseModel):

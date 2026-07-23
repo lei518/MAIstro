@@ -98,6 +98,11 @@ async def upload_sheet(file: UploadFile = File(...)) -> SheetUploadResponse:
         notes_count=analysis["notes_count"],
         duration_seconds=analysis["duration_seconds"],
         difficulty_score=analysis["difficulty_score"],
+        difficulty_label=analysis.get("difficulty_label", "Beginner"),
+        estimated_grade=analysis.get("estimated_grade", "Grade 1–2"),
+        omr_disclaimer_required=analysis.get("omr_disclaimer_required", False),
+        difficulty_reasons=analysis.get("difficulty_reasons", []),
+        difficulty_features=analysis.get("difficulty_features", {}),
         musicxml=musicxml,
         notes=analysis["notes"],
         timestamp=uploaded_at,
@@ -180,42 +185,78 @@ def get_stats(session_id: str) -> StatsResponse:
 
 def _build_pitch_messages(session: dict, notes: list[dict], elapsed: float, frequency: float, confidence: float) -> list[dict]:
     tempo = int(session.get("tempo") or 120)
+
     expected = expected_note_at_elapsed(notes, elapsed, tempo)
     expected_freq = expected.get("frequency") if expected else None
+    expected_note = expected.get("name") if expected else None
     note_index = expected.get("index") if expected else None
+
     cent_diff = cents_difference(frequency, expected_freq) if expected_freq else None
-    db.insert_pitch_frame(session["session_id"], elapsed, frequency, confidence, expected_freq, cent_diff, note_index)
+
+    db.insert_pitch_frame(
+        session["session_id"],
+        elapsed,
+        frequency,
+        confidence,
+        expected_freq,
+        cent_diff,
+        note_index,
+    )
+
+    is_correct = None
+    pitch_direction = None
+
+    if cent_diff is not None:
+        is_correct = abs(cent_diff) <= settings.PITCH_TOLERANCE_CENTS
+
+        if not is_correct:
+            pitch_direction = "high" if cent_diff > 0 else "low"
+
     pitch_update = {
         "type": "pitch_update",
         "frequency": frequency,
         "note_name": frequency_to_note_name(frequency),
         "confidence": confidence,
         "expected_freq": expected_freq,
-        "cent_diff": cent_diff,
+        "expected_note": expected_note,
+        "is_correct": is_correct,
+        "pitch_direction": pitch_direction,
         "note_index": note_index,
         "timestamp": elapsed,
         "engine": pitch_estimator.engine,
     }
+
     messages = [pitch_update]
+
     if (
         expected_freq is not None
         and cent_diff is not None
         and confidence >= settings.PITCH_CONFIDENCE_MIN
         and abs(cent_diff) > settings.PITCH_TOLERANCE_CENTS
     ):
-        db.insert_mistake(session["session_id"], int(note_index or 0), float(expected_freq), float(frequency), float(cent_diff), elapsed)
-        direction = "high" if cent_diff > 0 else "low"
+        db.insert_mistake(
+            session["session_id"],
+            int(note_index or 0),
+            float(expected_freq),
+            float(frequency),
+            float(cent_diff),
+            elapsed,
+        )
+
+        direction = "too high" if cent_diff > 0 else "too low"
+
         messages.append(
             {
                 "type": "mistake",
-                "message": f"Pitch {direction} by {abs(cent_diff):.1f} cents",
+                "message": f"Pitch is {direction}",
                 "note_index": note_index,
                 "expected_freq": expected_freq,
+                "expected_note": expected_note,
                 "actual_freq": frequency,
-                "cent_diff": cent_diff,
                 "timestamp": elapsed,
             }
         )
+
     return messages
 
 

@@ -44,7 +44,10 @@ function SheetMetadataCard() {
           <div className="rounded-xl border border-slate-700 p-3">
             <p className="text-slate-500">Difficulty</p>
             <p className="font-semibold text-white">
-              {(sheet.difficulty_score * 100).toFixed(0)}%
+              {sheet.difficulty_label || 'Beginner'}
+            </p>
+            <p className="text-xs text-slate-400">
+              {sheet.estimated_grade || `${(sheet.difficulty_score * 100).toFixed(0)}%`}
             </p>
           </div>
         </div>
@@ -73,7 +76,9 @@ export default function App() {
     }
 
     loadHealth();
+
     const id = setInterval(loadHealth, 5000);
+
     return () => clearInterval(id);
   }, [setHealth, setError]);
 
@@ -137,7 +142,9 @@ export default function App() {
                   <FeedbackOverlay />
                 ) : (
                   <section className="rounded-2xl bg-slate-900/80 p-4 shadow-lg">
-                    <h2 className="mb-3 text-xl font-semibold text-white">Next Step</h2>
+                    <h2 className="mb-3 text-xl font-semibold text-white">
+                      Next Step
+                    </h2>
                     <p className="text-sm text-slate-300">
                       Review the rendered sheet, set the tempo, then start practice.
                     </p>
