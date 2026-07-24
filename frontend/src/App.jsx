@@ -130,26 +130,34 @@ export default function App() {
           <div className="flex flex-col gap-4">
             <SheetMetadataCard />
 
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
+            <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
               <div className="min-w-0">
                 <ScoreViewer />
               </div>
 
-              <div className="space-y-4">
+              <div
+                className="maistro-right-rail space-y-4 tabular-nums xl:sticky xl:top-4 xl:self-start xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto xl:overscroll-contain xl:pr-2"
+                style={{
+                  scrollbarGutter: 'stable',
+                  overflowAnchor: 'none',
+                }}
+              >
                 <Controls />
 
-                {shouldShowFeedback ? (
-                  <FeedbackOverlay />
-                ) : (
-                  <section className="rounded-2xl bg-slate-900/80 p-4 shadow-lg">
-                    <h2 className="mb-3 text-xl font-semibold text-white">
-                      Next Step
-                    </h2>
-                    <p className="text-sm text-slate-300">
-                      Review the rendered sheet, set the tempo, then start practice.
-                    </p>
-                  </section>
-                )}
+                <div className="min-h-[420px]">
+                  {shouldShowFeedback ? (
+                    <FeedbackOverlay />
+                  ) : (
+                    <section className="rounded-2xl bg-slate-900/80 p-4 shadow-lg">
+                      <h2 className="mb-3 text-xl font-semibold text-white">
+                        Next Step
+                      </h2>
+                      <p className="text-sm text-slate-300">
+                        Review the rendered sheet, set the tempo, then start practice.
+                      </p>
+                    </section>
+                  )}
+                </div>
               </div>
             </div>
           </div>
