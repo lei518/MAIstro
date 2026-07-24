@@ -23,3 +23,21 @@ button:disabled {
   width: 100%;
   height: auto;
 }
+
+
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  overflow-anchor: none;
+}
+
+.maistro-right-rail {
+  overflow-anchor: none;
+}
+
+.maistro-right-rail,
+.maistro-right-rail * {
+  font-variant-numeric: tabular-nums;
+}

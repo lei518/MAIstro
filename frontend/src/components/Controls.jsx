@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import PracticeProgress from './PracticeProgress.jsx';
+import {
+  buildScoreTimeline,
+  getScoreStateAtBeat,
+} from '../utils/scoreTimeline.js';
 import {
   endSession,
   getStats,
@@ -13,66 +18,67 @@ let micStream = null;
 let processor = null;
 let source = null;
 let activeSocket = null;
-let metronomeTimer = null;
 let clickContext = null;
+let practiceClockGeneration = 0;
+const practiceTimerIds = new Set();
+const scheduledClickNodes = new Set();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getTimeSignatureFromMusicXml(musicxml) {
-  try {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(musicxml, 'application/xml');
-
-    const beats = doc.querySelector('time > beats')?.textContent?.trim();
-    const beatType = doc.querySelector('time > beat-type')?.textContent?.trim();
-
-    if (!beats || !beatType) {
-      return {
-        beats: 4,
-        beatType: 4,
-        label: '4/4',
-        detected: false,
-      };
-    }
-
-    return {
-      beats: Number(beats),
-      beatType: Number(beatType),
-      label: `${beats}/${beatType}`,
-      detected: true,
-    };
-  } catch {
-    return {
-      beats: 4,
-      beatType: 4,
-      label: '4/4',
-      detected: false,
-    };
+async function ensureClickContext() {
+  if (!clickContext) {
+    clickContext = new AudioContext({
+      latencyHint: 'interactive',
+    });
   }
+
+  if (clickContext.state === 'suspended') {
+    await clickContext.resume();
+  }
+
+  return clickContext;
 }
 
-function playClick(accent = false) {
-  if (!clickContext) {
-    clickContext = new AudioContext();
-  }
+function playClick(accent = false, scheduledTime = null) {
+  if (!clickContext) return;
 
-  const osc = clickContext.createOscillator();
+  const startTime = Math.max(
+    scheduledTime ?? clickContext.currentTime,
+    clickContext.currentTime,
+  );
+
+  const oscillator = clickContext.createOscillator();
   const gain = clickContext.createGain();
 
-  osc.type = 'sine';
-  osc.frequency.value = accent ? 1200 : 850;
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(
+    accent ? 1200 : 850,
+    startTime,
+  );
 
-  gain.gain.setValueAtTime(0.0001, clickContext.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.35, clickContext.currentTime + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.0001, clickContext.currentTime + 0.11);
+  gain.gain.setValueAtTime(0.0001, startTime);
+  gain.gain.exponentialRampToValueAtTime(
+    0.35,
+    startTime + 0.01,
+  );
+  gain.gain.exponentialRampToValueAtTime(
+    0.0001,
+    startTime + 0.11,
+  );
 
-  osc.connect(gain);
+  oscillator.connect(gain);
   gain.connect(clickContext.destination);
 
-  osc.start(clickContext.currentTime);
-  osc.stop(clickContext.currentTime + 0.12);
+  scheduledClickNodes.add(oscillator);
+
+  oscillator.onended = () => {
+    scheduledClickNodes.delete(oscillator);
+  };
+
+  oscillator.start(startTime);
+  oscillator.stop(startTime + 0.12);
 }
 
 async function prepareMicPermission() {
@@ -131,10 +137,23 @@ function stopBrowserMic() {
 }
 
 function stopMetronomeLoop() {
-  if (metronomeTimer) {
-    clearInterval(metronomeTimer);
-    metronomeTimer = null;
-  }
+  practiceClockGeneration += 1;
+
+  practiceTimerIds.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+
+  practiceTimerIds.clear();
+
+  scheduledClickNodes.forEach((oscillator) => {
+    try {
+      oscillator.stop();
+    } catch {
+      // The oscillator may already have ended.
+    }
+  });
+
+  scheduledClickNodes.clear();
 }
 
 function StepBadge({ number, label, active, done }) {
@@ -184,15 +203,36 @@ export default function Controls() {
     resetPractice,
   } = useMaistroStore();
 
-  const timeSignature = sheet?.musicxml
-    ? getTimeSignatureFromMusicXml(sheet.musicxml)
-    : { beats: 4, beatType: 4, label: '4/4', detected: false };
+  const scoreTimeline = useMemo(
+    () => buildScoreTimeline(sheet?.musicxml),
+    [sheet?.musicxml],
+  );
+
+  const timeSignature = {
+    beats: scoreTimeline.beatsPerMeasure,
+    beatType: scoreTimeline.beatType,
+    label: scoreTimeline.timeSignature,
+    detected: scoreTimeline.totalMeasures > 0,
+  };
 
   useEffect(() => {
     setTempoConfirmed(false);
     setCountInBusy(false);
     setCountInNumber(null);
   }, [sheet?.sheet_id]);
+
+  useEffect(() => {
+    return () => {
+      stopMetronomeLoop();
+      stopBrowserMic();
+
+      if (
+        activeSocket?.readyState === WebSocket.OPEN
+      ) {
+        activeSocket.close();
+      }
+    };
+  }, []);
 
   async function onUpload() {
     const file = inputRef.current?.files?.[0];
@@ -269,36 +309,117 @@ export default function Controls() {
     return newSession;
   }
 
-  function startMetronomeLoop() {
-    stopMetronomeLoop();
+  function schedulePracticeEvent(
+    eventName,
+    detail,
+    audioTime,
+    generation,
+  ) {
+    const delayMs = Math.max(
+      0,
+      (audioTime - clickContext.currentTime) * 1000,
+    );
 
-    const intervalMs = 60000 / tempo;
-    let beatNumber = 1;
+    const timerId = window.setTimeout(() => {
+      practiceTimerIds.delete(timerId);
 
-    function fireBeat() {
-      const beatInMeasure = ((beatNumber - 1) % timeSignature.beats) + 1;
-      const accent = beatInMeasure === 1;
-
-      if (enableMetronome) {
-        playClick(accent);
+      if (generation !== practiceClockGeneration) {
+        return;
       }
 
       window.dispatchEvent(
-        new CustomEvent('maistro:beat', {
-          detail: {
-            beatNumber,
-            beatInMeasure,
-            beatsPerMeasure: timeSignature.beats,
-            tempo,
-          },
-        })
+        new CustomEvent(eventName, {
+          detail,
+        }),
       );
+    }, delayMs);
 
-      beatNumber += 1;
+    practiceTimerIds.add(timerId);
+  }
+
+  async function startMetronomeLoop() {
+    stopMetronomeLoop();
+
+    if (scoreTimeline.totalBeats <= 0) {
+      throw new Error(
+        'MAIstro could not calculate the score duration.',
+      );
     }
 
-    fireBeat();
-    metronomeTimer = setInterval(fireBeat, intervalMs);
+    await ensureClickContext();
+
+    const generation = practiceClockGeneration;
+    const secondsPerBeat = 60 / tempo;
+    const leadInSeconds = 0.08;
+
+    const startAudioTime =
+      clickContext.currentTime + leadInSeconds;
+
+    const startPerformanceMs =
+      performance.now() + leadInSeconds * 1000;
+
+    const wholeBeatCount = Math.ceil(
+      scoreTimeline.totalBeats - 0.000001,
+    );
+
+    for (
+      let beatIndex = 0;
+      beatIndex < wholeBeatCount;
+      beatIndex += 1
+    ) {
+      const scoreBeat = beatIndex;
+
+      const scoreState = getScoreStateAtBeat(
+        scoreTimeline,
+        scoreBeat,
+      );
+
+      const scheduledTime =
+        startAudioTime + scoreBeat * secondsPerBeat;
+
+      const accent = scoreState.beatInMeasure === 1;
+
+      if (enableMetronome) {
+        playClick(accent, scheduledTime);
+      }
+
+      schedulePracticeEvent(
+        'maistro:beat',
+        {
+          beatNumber: beatIndex + 1,
+          elapsedBeats: scoreBeat,
+          beatInMeasure: scoreState.beatInMeasure,
+          beatsPerMeasure: scoreState.beatsPerMeasure,
+          measureNumber: scoreState.measureNumber,
+          tempo,
+        },
+        scheduledTime,
+        generation,
+      );
+    }
+
+    const completionAudioTime =
+      startAudioTime +
+      scoreTimeline.totalBeats * secondsPerBeat;
+
+    schedulePracticeEvent(
+      'maistro:score-complete',
+      {
+        totalBeats: scoreTimeline.totalBeats,
+        tempo,
+      },
+      completionAudioTime,
+      generation,
+    );
+
+    return {
+      startAudioTime,
+      startPerformanceMs,
+      totalBeats: scoreTimeline.totalBeats,
+      tempo,
+      beatType: scoreTimeline.beatType,
+      timeSignature: scoreTimeline.timeSignature,
+    };
   }
 
   async function onStartWithCountIn() {
@@ -316,6 +437,8 @@ export default function Controls() {
     resetPractice();
 
     try {
+      await ensureClickContext();
+
       if (audioSource === 'browser') {
         await prepareMicPermission();
       }
@@ -348,12 +471,17 @@ export default function Controls() {
       setCountInNumber(null);
       setCountInBusy(false);
 
+      await openBackendPracticeSession();
+
       setPracticeBusy(true);
 
-      window.dispatchEvent(new CustomEvent('maistro:practice-start'));
+      const practiceClock = await startMetronomeLoop();
 
-      await openBackendPracticeSession();
-      startMetronomeLoop();
+      window.dispatchEvent(
+        new CustomEvent('maistro:practice-start', {
+          detail: practiceClock,
+        }),
+      );
     } catch (err) {
       setCountInBusy(false);
       setPracticeBusy(false);
@@ -506,6 +634,8 @@ export default function Controls() {
           Follow the score cursor and play with the metronome.
         </p>
 
+        <PracticeProgress />
+
         <div className="mb-4 rounded-xl border border-slate-700 p-4 text-sm text-slate-300">
           <p>
             <span className="text-slate-500">Tempo:</span> {tempo} BPM
@@ -603,6 +733,36 @@ export default function Controls() {
         Press Start Practice. MAIstro will count {timeSignature.beats} beats in {timeSignature.label} time,
         then practice will begin.
       </p>
+
+      {scoreTimeline.hasRecognizedRepeats && (
+        <div className="mb-4 rounded-xl border border-sky-400/30 bg-sky-500/10 p-3 text-sm text-sky-200">
+          MAIstro found {scoreTimeline.totalRepeatCount}{' '}
+          repeat section
+          {scoreTimeline.totalRepeatCount === 1 ? '' : 's'}.
+          The metronome, progress bar, and score cursor will follow
+          the repeated playback order.
+          {scoreTimeline.inferredRepeatCount > 0 && (
+            <>
+              {' '}
+              {scoreTimeline.inferredRepeatCount} closing repeat
+              {scoreTimeline.inferredRepeatCount === 1 ? ' was' : 's were'} inferred
+              from an unmatched forward repeat and a final heavy barline.
+            </>
+          )}
+        </div>
+      )}
+
+      {!scoreTimeline.hasRecognizedRepeats &&
+        scoreTimeline.doubleBarMeasures.length > 0 && (
+          <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 text-sm text-amber-200">
+            A plain double barline was detected at measure{' '}
+            {scoreTimeline.doubleBarMeasures.join(', ')}, but the
+            MusicXML contains no repeat instruction. A double
+            barline separates sections; it does not automatically
+            repeat them. If the source image has repeat dots,
+            Audiveris did not recognize them.
+          </div>
+        )}
 
       <div className="mb-4 rounded-xl border border-slate-700 p-4 text-sm text-slate-300">
         <p className="mb-2">
